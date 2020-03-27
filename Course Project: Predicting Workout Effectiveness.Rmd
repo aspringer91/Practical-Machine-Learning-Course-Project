@@ -1,0 +1,182 @@
+---
+title: "Predicting Workout Effectiveness"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE)
+library(caret)
+```
+
+# Practical Machine Learning: Course Project
+
+## Executive Summary
+
+This analysis will predict the effectiveness of an individual's workout using accelerometer data collected from wearable devices. The data was obtained from http://web.archive.org/web/20161224072740/http:/groupware.les.inf.puc-rio.br/har. Participants performed a series of exercies in 5 different ways, some with correct form and others with incorrect form. This analysis will use the accelerometer data to predict which form was used in completing the exercise.
+
+The final model used was a "majority rules" classifier based on a combination of three different prediction models. The prediction models were random forest, boosting, and a naive bayes classifier. Individually the random forest had the best accuracy of the three, but the idea behind combining them was to help reduce any overfitting the random forest may have done. If two of the three predictors agreed on the class, then that was used as the final class. If all three predictors yielded different classes then the random forest would be the default because it had the best individual accuracy.
+
+Based on tests done using a validation set, the estimated out of sample error is 98%.
+
+## Exploratory Data Analysis
+
+The first phase in building a model is to understand the data. I will attempt to create plots that help show the distribution of the data, check for outliers and correletions between variables, and any unexpected patterns in the data. Note that prior to EDA the data was split into two sets, one for training and one for validating, and EDA was performed on the training set only.
+
+```{r cache=T}
+set.seed(17)
+downloadTraining <- read.csv("https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv")
+inTrain <- createDataPartition(y = downloadTraining$classe,
+                               p = 0.8, list=F)
+validation <- downloadTraining[-inTrain,]
+training <- downloadTraining[inTrain,]
+
+training <- training[!training$gyros_dumbbell_z == max(training$gyros_dumbbell_z),]
+
+naCount <- apply(training, 2, function(x) {sum(is.na(x))})
+blankCount <- apply(training, 2, function(x) {sum(x == "")})
+naCols <- names(naCount[naCount > 12000])
+blankCols <- names(blankCount[blankCount > 12000])
+non_predict <- c("X","raw_timestamp_part_1","raw_timestamp_part_2","cvtd_timestamp","new_window","num_window")
+selectCols <- function(df){
+    selectCols <- df[,!names(df) %in% c(naCols,blankCols,non_predict)]
+    return(selectCols)
+}
+training <- selectCols(training)
+validation <- selectCols(validation)
+```
+
+The first observation was some features had many NAs or blanks, or were not features that should be used for predicting (ex. timestamp) so those columns were removed. It was also noticed there was one row that was an extreme outlier (more than 100x greater than next largest value) so that row was removed. The remaining columns were put into a correlation matrix. We can see there are some high correlations between the different measurements from the same body part, for example belt measures are correlated and dumbbell measures are correlated. That seems reasonable and provides evidence that dimensionality reduction could be an option.
+
+```{r fig.width=9, fig.height=9}
+correlations <- cor(subset(training,select=-c(classe,user_name)),use="complete.obs")
+corrplot::corrplot(correlations)
+```
+
+Next I will show a series of plots to get a feel for the distribution of each variable. Since there are more than 50 features it isn't feasible to plot them all, therefore, I randomly select 6 features from the dataset and create a grid of plots, one for each feature. That will give us an idea of patterns in the dataset.
+
+### Boxplots
+```{r, fig.width=9}
+#   boxplots to identify outliers
+features <- colnames(training)
+features <- features[!features %in% c("user_name","classe")]
+boxplotFeat <- sample(features,6)
+par(mfrow = c(2,3))
+for (feat in boxplotFeat) {
+    x <- training[,feat]
+    boxplot(x, main = feat)
+}
+```
+
+### Histograms
+
+```{r, fig.width=9}
+#   histograms to indentify distributions
+set.seed(19)
+histFeat <- sample(features,6)
+par(mfrow = c(2,3))
+for (feat in histFeat) {
+    x <- training[,feat]
+    hist(x, main = feat)
+}
+```
+
+### Dot Plots colored by participant name
+
+```{r, fig.width=9}
+#   dot plots to see grouping by user_name
+set.seed(8)
+dotFeat <- sample(features,6)
+par(mfrow = c(2,3))
+for (feat in dotFeat) {
+    x <- training[,feat]
+    plot(x, main = feat, col = training$user_name)
+}
+```
+
+There are some patterns emerging that are worth noting. From the boxplots we see that there are many points outside the whiskers of the plot, meaning the distributions are likely not concentrated around the median but rather are more spread out. From the histograms, we see that most of the variables are not normally distributed but have two peaks, or are more uniformly distributed with one large peak. The final plot could explain some of these patterns. We can see that there tends to be clear distinctions between participants in some variables. Since there are only 6 participants the variation between each one could explain the non-gaussian patterns in the histograms.
+
+## Building Prediction Models
+
+### Linear Discriminant Analysis
+
+Since there were some variables with high correlation, my first thought was an LCA model to reduce some of the dimensionality. I standardized the data and then fit an LDA model. However, the LDA model did not perform well. The accuracy and confusion matrix are printed below. It's clear to see the algorithm was unlikely to predict classe B or D, making the accuracy approximately 35%.
+
+```{r}
+readCM <- readRDS("ldaConfusionMatrix.rds")
+readCM$overall[1]
+readCM$table
+```
+
+An LDA model assumes the data are normally distributed, which is likely the issue with this approach. It's easy to see from the boxplots and histograms above that many of the features have distributions that are not at all normal. 
+
+### Cross Validation
+
+In the remaining models, 5-fold cross validation was used for tuning the final model. A train control object with 5 folds was created and used as input to all the training functions. Cross validation was used in this way to provide some protection against overfitting to one training set, and to help fine tune the models parameters. I used 5 folds so that the models wouldn't be too computationally expensive but I could still see some of the cross validation benefits. 
+
+### Random Forest
+
+The next model I fit was a random forest using all the predictors. This model performed exceptionally well yielding better than 99% accuracy on my validation set! However, random forests can be susceptible to overfitting so I had some concern about that. The results are below:
+
+```{r}
+rfMod <- readRDS("rfMod.rds")
+rfPreds <- predict(rfMod, validation)
+cm <- confusionMatrix(rfPreds, validation$classe)
+rm(rfMod)
+cm$overall[1]
+cm$table
+```
+
+### Boosting 
+
+The next algorithm I tested was a Gradient Boosted Machine using the "gbm" method in caret. This model also performed very well yielding an accuracy above 96%. The results are below:
+
+```{r}
+gbmMod <- readRDS("gbmMod.rds")
+gbmPreds <- predict(gbmMod, validation)
+cm <- confusionMatrix(gbmPreds, validation$classe)
+rm(gbmMod)
+cm$overall[1]
+cm$table
+```
+
+### Naive Bayes
+
+The last algorithm I tested was a Naive Bayes classifier. This model had a lower accuracy at around 75%. The results are below:
+
+```{r, warning=FALSE,message=FALSE, cache=TRUE}
+nbMod <- readRDS("nbMod.rds")
+nbPreds <- predict(nbMod, validation)
+cm <- confusionMatrix(nbPreds, validation$classe)
+rm(nbMod)
+cm$overall[1]
+cm$table
+```
+
+### Stacked Model
+
+To make the final prediction I used a stacked approach with a "majority rules" decision. I took the predictions from the last three of my models, random forest, gbm, and naive bayes and compared them. If two or more of the models agreed, then I chose that prediction as the final class. If all three predicted different classes then I defaulted to the random forest because that had the best accuracy individually. The idea behind this approach is that by combining different algorithms it's possible to reduce overfitting error and yield a model that performs better on unseen data. This model yielded an accuracy of 98%. The results of this blended algorithm are below:
+
+```{r}
+preds <- data.frame(rf = rfPreds, gbm = gbmPreds, nbAll = nbPreds)
+#sum(preds$rf == preds$gbm & preds$rf == preds$nbAll)
+#sum(preds$gbm == preds$nbAll & preds$gbm != preds$rf)/nrow(preds)
+#preds$classe <- NULL
+#str(preds)
+makePred <- function(dfRow) {
+    if (dfRow[1] == dfRow[2]) {
+        return(dfRow[1])
+    } else if (dfRow[1] == dfRow[3]) {
+        return(dfRow[1])
+    } else if (dfRow[2] == dfRow[3]) {
+        return(dfRow[2])
+    } else {
+        return(dfRow[1])
+    }
+} 
+preds$stacked <- apply(preds,1,makePred)
+preds$stacked <- factor(preds$stacked)
+cm <- confusionMatrix(preds$stacked, validation$classe)
+cm$overall[1]
+cm$table
+
+```
